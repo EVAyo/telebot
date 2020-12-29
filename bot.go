@@ -540,11 +540,12 @@ func (b *Bot) SendAlbum(to Recipient, a Album, options ...interface{}) ([]Messag
 	media := make([]string, len(a))
 	files := make(map[string]File)
 
-	for i, x := range a {
+	for i, v := range a {
 		var (
 			repr string
+			kind string
 			data []byte
-			file = x.MediaFile()
+			file = v.MediaFile()
 		)
 
 		switch {
@@ -559,40 +560,28 @@ func (b *Bot) SendAlbum(to Recipient, a Album, options ...interface{}) ([]Messag
 			return nil, errors.Errorf("telebot: album entry #%d does not exist", i)
 		}
 
-		switch y := x.(type) {
+		switch v.(type) {
 		case *Photo:
-			data, _ = json.Marshal(struct {
-				Type      string    `json:"type"`
-				Media     string    `json:"media"`
-				Caption   string    `json:"caption,omitempty"`
-				ParseMode ParseMode `json:"parse_mode,omitempty"`
-			}{
-				Type:      "photo",
-				Media:     repr,
-				Caption:   y.Caption,
-				ParseMode: y.ParseMode,
-			})
+			kind = "photo"
 		case *Video:
-			data, _ = json.Marshal(struct {
-				Type              string `json:"type"`
-				Caption           string `json:"caption"`
-				Media             string `json:"media"`
-				Width             int    `json:"width,omitempty"`
-				Height            int    `json:"height,omitempty"`
-				Duration          int    `json:"duration,omitempty"`
-				SupportsStreaming bool   `json:"supports_streaming,omitempty"`
-			}{
-				Type:              "video",
-				Caption:           y.Caption,
-				Media:             repr,
-				Width:             y.Width,
-				Height:            y.Height,
-				Duration:          y.Duration,
-				SupportsStreaming: y.SupportsStreaming,
-			})
+			kind = "video"
+		case *Audio:
+			kind = "audio"
+		case *Document:
+			kind = "document"
 		default:
 			return nil, errors.Errorf("telebot: album entry #%d is not valid", i)
 		}
+
+		data, _ = json.Marshal(struct {
+			InputMedia
+			Type  string `json:"type"`
+			Media string `json:"media"`
+		}{
+			InputMedia: v,
+			Type:       kind,
+			Media:      repr,
+		})
 
 		media[i] = string(data)
 	}

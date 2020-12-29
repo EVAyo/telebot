@@ -16,6 +16,9 @@ type InputMedia interface {
 	// As some files must be uploaded (instead of referencing)
 	// outer layers of Telebot require it.
 	MediaFile() *File
+
+	// NOTE: To add in v3.
+	// Type() string
 }
 
 // Photo object represents a single photo file.
