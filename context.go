@@ -11,10 +11,19 @@ import (
 // used to handle actual endpoints.
 type HandlerFunc func(Context) error
 
+// NewContext returns a new native context object,
+// field by the passed update.
+func NewContext(b API, u Update) Context {
+	return &nativeContext{
+		b: b,
+		u: u,
+	}
+}
+
 // Context wraps an update and represents the context of current event.
 type Context interface {
 	// Bot returns the bot instance.
-	Bot() *Bot
+	Bot() API
 
 	// Update returns the original update.
 	Update() Update
@@ -37,6 +46,9 @@ type Context interface {
 	// PreCheckoutQuery returns stored pre checkout query if such presented.
 	PreCheckoutQuery() *PreCheckoutQuery
 
+	// Payment returns payment instance.
+	Payment() *Payment
+
 	// Poll returns stored poll if such presented.
 	Poll() *Poll
 
@@ -46,11 +58,20 @@ type Context interface {
 	// ChatMember returns chat member changes.
 	ChatMember() *ChatMemberUpdate
 
-	// ChatJoinRequest returns cha
+	// ChatJoinRequest returns the chat join request.
 	ChatJoinRequest() *ChatJoinRequest
 
 	// Migration returns both migration from and to chat IDs.
 	Migration() (int64, int64)
+
+	// Topic returns the topic changes.
+	Topic() *Topic
+
+	// Boost returns the boost instance.
+	Boost() *BoostUpdated
+
+	// BoostRemoved returns the boost removed from a chat instance.
+	BoostRemoved() *BoostRemoved
 
 	// Sender returns the current recipient, depending on the context type.
 	// Returns nil if user is not presented.
@@ -59,7 +80,6 @@ type Context interface {
 	// Chat returns the current chat, depending on the context type.
 	// Returns nil if chat is not presented.
 	Chat() *Chat
-
 	// Recipient combines both Sender and Chat functions. If there is no user
 	// the chat will be returned. The native context cannot be without sender,
 	// but it is useful in the case when the context created intentionally
@@ -69,6 +89,10 @@ type Context interface {
 	// Text returns the message text, depending on the context type.
 	// In the case when no related data presented, returns an empty string.
 	Text() string
+
+	// Entities returns the message entities, whether it's media caption's or the text's.
+	// In the case when no entities presented, returns a nil.
+	Entities() Entities
 
 	// Data returns the current data, depending on the context type.
 	// If the context contains command, returns its arguments string.
@@ -145,6 +169,12 @@ type Context interface {
 	// See Respond from bot.go.
 	Respond(resp ...*CallbackResponse) error
 
+	// RespondText sends a popup response for the current callback query.
+	RespondText(text string) error
+
+	// RespondAlert sends an alert response for the current callback query.
+	RespondAlert(text string) error
+
 	// Get retrieves data from the context.
 	Get(key string) interface{}
 
@@ -155,13 +185,13 @@ type Context interface {
 // nativeContext is a native implementation of the Context interface.
 // "context" is taken by context package, maybe there is a better name.
 type nativeContext struct {
-	b     *Bot
+	b     API
 	u     Update
 	lock  sync.RWMutex
 	store map[string]interface{}
 }
 
-func (c *nativeContext) Bot() *Bot {
+func (c *nativeContext) Bot() API {
 	return c.b
 }
 
@@ -209,6 +239,13 @@ func (c *nativeContext) PreCheckoutQuery() *PreCheckoutQuery {
 	return c.u.PreCheckoutQuery
 }
 
+func (c *nativeContext) Payment() *Payment {
+	if c.u.Message == nil {
+		return nil
+	}
+	return c.u.Message.Payment
+}
+
 func (c *nativeContext) ChatMember() *ChatMemberUpdate {
 	switch {
 	case c.u.ChatMember != nil:
@@ -233,7 +270,35 @@ func (c *nativeContext) PollAnswer() *PollAnswer {
 }
 
 func (c *nativeContext) Migration() (int64, int64) {
-	return c.u.Message.MigrateFrom, c.u.Message.MigrateTo
+	m := c.u.Message
+	if m == nil {
+		return 0, 0
+	}
+	return m.MigrateFrom, m.MigrateTo
+}
+
+func (c *nativeContext) Topic() *Topic {
+	m := c.u.Message
+	if m == nil {
+		return nil
+	}
+	switch {
+	case m.TopicCreated != nil:
+		return m.TopicCreated
+	case m.TopicReopened != nil:
+		return m.TopicReopened
+	case m.TopicEdited != nil:
+		return m.TopicEdited
+	}
+	return nil
+}
+
+func (c *nativeContext) Boost() *BoostUpdated {
+	return c.u.Boost
+}
+
+func (c *nativeContext) BoostRemoved() *BoostRemoved {
+	return c.u.BoostRemoved
 }
 
 func (c *nativeContext) Sender() *User {
@@ -258,9 +323,16 @@ func (c *nativeContext) Sender() *User {
 		return c.u.ChatMember.Sender
 	case c.u.ChatJoinRequest != nil:
 		return c.u.ChatJoinRequest.Sender
-	default:
-		return nil
+	case c.u.Boost != nil:
+		if b := c.u.Boost.Boost; b != nil && b.Source != nil {
+			return b.Source.Booster
+		}
+	case c.u.BoostRemoved != nil:
+		if b := c.u.BoostRemoved; b.Source != nil {
+			return b.Source.Booster
+		}
 	}
+	return nil
 }
 
 func (c *nativeContext) Chat() *Chat {
@@ -297,10 +369,25 @@ func (c *nativeContext) Text() string {
 	return m.Text
 }
 
+func (c *nativeContext) Entities() Entities {
+	m := c.Message()
+	if m == nil {
+		return nil
+	}
+	if len(m.CaptionEntities) > 0 {
+		return m.CaptionEntities
+	}
+	return m.Entities
+}
+
 func (c *nativeContext) Data() string {
 	switch {
 	case c.u.Message != nil:
-		return c.u.Message.Payload
+		m := c.u.Message
+		if m.Payment != nil {
+			return m.Payment.Payload
+		}
+		return m.Payload
 	case c.u.Callback != nil:
 		return c.u.Callback.Data
 	case c.u.Query != nil:
@@ -317,11 +404,14 @@ func (c *nativeContext) Data() string {
 }
 
 func (c *nativeContext) Args() []string {
+	m := c.u.Message
 	switch {
-	case c.u.Message != nil:
-		payload := strings.Trim(c.u.Message.Payload, " ")
+	case m != nil && m.Payment != nil:
+		return strings.Split(m.Payment.Payload, "|")
+	case m != nil:
+		payload := strings.Trim(m.Payload, " ")
 		if payload != "" {
-			return strings.Split(payload, " ")
+			return strings.Fields(payload)
 		}
 	case c.u.Callback != nil:
 		return strings.Split(c.u.Callback.Data, "|")
@@ -417,7 +507,9 @@ func (c *nativeContext) Delete() error {
 func (c *nativeContext) DeleteAfter(d time.Duration) *time.Timer {
 	return time.AfterFunc(d, func() {
 		if err := c.Delete(); err != nil {
-			c.b.OnError(err, c)
+			if b, ok := c.b.(*Bot); ok {
+				b.OnError(err, c)
+			}
 		}
 	})
 }
@@ -440,18 +532,26 @@ func (c *nativeContext) Accept(errorMessage ...string) error {
 	return c.b.Accept(c.u.PreCheckoutQuery, errorMessage...)
 }
 
-func (c *nativeContext) Answer(resp *QueryResponse) error {
-	if c.u.Query == nil {
-		return errors.New("telebot: context inline query is nil")
-	}
-	return c.b.Answer(c.u.Query, resp)
-}
-
 func (c *nativeContext) Respond(resp ...*CallbackResponse) error {
 	if c.u.Callback == nil {
 		return errors.New("telebot: context callback is nil")
 	}
 	return c.b.Respond(c.u.Callback, resp...)
+}
+
+func (c *nativeContext) RespondText(text string) error {
+	return c.Respond(&CallbackResponse{Text: text})
+}
+
+func (c *nativeContext) RespondAlert(text string) error {
+	return c.Respond(&CallbackResponse{Text: text, ShowAlert: true})
+}
+
+func (c *nativeContext) Answer(resp *QueryResponse) error {
+	if c.u.Query == nil {
+		return errors.New("telebot: context inline query is nil")
+	}
+	return c.b.Answer(c.u.Query, resp)
 }
 
 func (c *nativeContext) Set(key string, value interface{}) {
@@ -461,6 +561,7 @@ func (c *nativeContext) Set(key string, value interface{}) {
 	if c.store == nil {
 		c.store = make(map[string]interface{})
 	}
+
 	c.store[key] = value
 }
 

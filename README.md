@@ -2,6 +2,7 @@
 >"I never knew creating Telegram bots could be so _sexy_!"
 
 [![GoDoc](https://godoc.org/gopkg.in/telebot.v3?status.svg)](https://godoc.org/gopkg.in/telebot.v3)
+[![GitHub Actions](https://github.com/tucnak/telebot/actions/workflows/go.yml/badge.svg)](https://github.com/tucnak/telebot/actions)
 [![codecov.io](https://codecov.io/gh/tucnak/telebot/coverage.svg?branch=v3)](https://codecov.io/gh/tucnak/telebot)
 [![Discuss on Telegram](https://img.shields.io/badge/telegram-discuss-0088cc.svg)](https://t.me/go_telebot)
 
@@ -79,7 +80,7 @@ Simple, innit? Telebot's routing system takes care of delivering updates
 to their endpoints, so in order to get to handle any meaningful event,
 all you got to do is just plug your function into one of the Telebot-provided
 endpoints. You can find the full list
-[here](https://godoc.org/gopkg.in/tucnak/telebot.v3#pkg-constants).
+[here](https://godoc.org/gopkg.in/telebot.v3#pkg-constants).
 
 There are dozens of supported endpoints (see package consts). Let me know
 if you'd like to see some endpoint or endpoint ideas implemented. This system
@@ -144,7 +145,8 @@ b.Use(middleware.Logger())
 b.Use(middleware.AutoRespond())
 
 // Group-scoped middleware:
-adminOnly := b.Group(middleware.Whitelist(adminIDs...))
+adminOnly := b.Group()
+adminOnly.Use(middleware.Whitelist(adminIDs...))
 adminOnly.Handle("/ban", onBan)
 adminOnly.Handle("/kick", onKick)
 
@@ -290,7 +292,7 @@ b.Send(user, "text", tele.Silent, tele.NoPreview)
 ```
 
 Full list of supported option-flags you can find
-[here](https://pkg.go.dev/gopkg.in/tucnak/telebot.v3#Option).
+[here](https://pkg.go.dev/gopkg.in/telebot.v3#Option).
 
 ## Editable
 If you want to edit some existing message, you don't really need to store the

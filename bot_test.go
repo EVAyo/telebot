@@ -17,13 +17,19 @@ import (
 
 var (
 	// required to test send and edit methods
-	token     = os.Getenv("TELEBOT_SECRET")
-	chatID, _ = strconv.ParseInt(os.Getenv("CHAT_ID"), 10, 64)
-	userID, _ = strconv.ParseInt(os.Getenv("USER_ID"), 10, 64)
+	token = os.Getenv("TELEBOT_SECRET")
+	b, _  = newTestBot() // cached bot instance to avoid getMe method flooding
 
-	b, _ = newTestBot()      // cached bot instance to avoid getMe method flooding
-	to   = &Chat{ID: chatID} // to chat recipient for send and edit methods
-	user = &User{ID: userID} // to user recipient for some special cases
+	chatID, _    = strconv.ParseInt(os.Getenv("CHAT_ID"), 10, 64)
+	userID, _    = strconv.ParseInt(os.Getenv("USER_ID"), 10, 64)
+	channelID, _ = strconv.ParseInt(os.Getenv("CHANNEL_ID"), 10, 64)
+
+	to      = &Chat{ID: chatID}    // to chat recipient for send and edit methods
+	user    = &User{ID: userID}    // to user recipient for some special cases
+	channel = &Chat{ID: channelID} // to channel recipient for some special cases
+
+	logo  = FromURL("https://telegra.ph/file/c95b8fe46dd3df15d12e5.png")
+	thumb = FromURL("https://telegra.ph/file/fe28e378784b3a4e367fb.png")
 )
 
 func defaultSettings() Settings {
@@ -54,8 +60,8 @@ func TestNewBot(t *testing.T) {
 
 	assert.NotNil(t, b.Me)
 	assert.Equal(t, DefaultApiURL, b.URL)
-	assert.Equal(t, http.DefaultClient, b.client)
 	assert.Equal(t, 100, cap(b.Updates))
+	assert.NotZero(t, b.client.Timeout)
 
 	pref = defaultSettings()
 	client := &http.Client{Timeout: time.Minute}
@@ -228,6 +234,10 @@ func TestBotProcessUpdate(t *testing.T) {
 		assert.NotNil(t, c.Message().Payment)
 		return nil
 	})
+	b.Handle(OnRefund, func(c Context) error {
+		assert.NotNil(t, c.Message().RefundedPayment)
+		return nil
+	})
 	b.Handle(OnAddedToGroup, func(c Context) error {
 		assert.NotNil(t, c.Message().GroupCreated)
 		return nil
@@ -305,6 +315,11 @@ func TestBotProcessUpdate(t *testing.T) {
 		return nil
 	})
 
+	b.Handle(OnWebApp, func(c Context) error {
+		assert.Equal(t, "webapp", c.Message().WebAppData.Data)
+		return nil
+	})
+
 	b.ProcessUpdate(Update{Message: &Message{Text: "/start"}})
 	b.ProcessUpdate(Update{Message: &Message{Text: "/start@other_bot"}})
 	b.ProcessUpdate(Update{Message: &Message{Text: "hello"}})
@@ -323,6 +338,7 @@ func TestBotProcessUpdate(t *testing.T) {
 	b.ProcessUpdate(Update{Message: &Message{Venue: &Venue{}}})
 	b.ProcessUpdate(Update{Message: &Message{Invoice: &Invoice{}}})
 	b.ProcessUpdate(Update{Message: &Message{Payment: &Payment{}}})
+	b.ProcessUpdate(Update{Message: &Message{RefundedPayment: &RefundedPayment{}}})
 	b.ProcessUpdate(Update{Message: &Message{Dice: &Dice{}}})
 	b.ProcessUpdate(Update{Message: &Message{GroupCreated: true}})
 	b.ProcessUpdate(Update{Message: &Message{UserJoined: &User{ID: 1}}})
@@ -345,6 +361,7 @@ func TestBotProcessUpdate(t *testing.T) {
 	b.ProcessUpdate(Update{PreCheckoutQuery: &PreCheckoutQuery{ID: "checkout"}})
 	b.ProcessUpdate(Update{Poll: &Poll{ID: "poll"}})
 	b.ProcessUpdate(Update{PollAnswer: &PollAnswer{PollID: "poll"}})
+	b.ProcessUpdate(Update{Message: &Message{WebAppData: &WebAppData{Data: "webapp"}}})
 }
 
 func TestBotOnError(t *testing.T) {
@@ -354,7 +371,7 @@ func TestBotOnError(t *testing.T) {
 	}
 
 	var ok bool
-	b.OnError = func(err error, c Context) {
+	b.onError = func(err error, c Context) {
 		assert.Equal(t, b, c.(*nativeContext).b)
 		assert.NotNil(t, err)
 		ok = true
@@ -365,6 +382,116 @@ func TestBotOnError(t *testing.T) {
 	}, &nativeContext{b: b})
 
 	assert.True(t, ok)
+}
+
+func TestBotMiddleware(t *testing.T) {
+	t.Run("calling order", func(t *testing.T) {
+		var trace []string
+
+		handler := func(name string) HandlerFunc {
+			return func(c Context) error {
+				trace = append(trace, name)
+				return nil
+			}
+		}
+
+		middleware := func(name string) MiddlewareFunc {
+			return func(next HandlerFunc) HandlerFunc {
+				return func(c Context) error {
+					trace = append(trace, name+":in")
+					err := next(c)
+					trace = append(trace, name+":out")
+					return err
+				}
+			}
+		}
+
+		b, err := NewBot(Settings{Synchronous: true, Offline: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		b.Use(middleware("global1"), middleware("global2"))
+		b.Handle("/a", handler("/a"), middleware("handler1a"), middleware("handler2a"))
+
+		group := b.Group()
+		group.Use(middleware("group1"), middleware("group2"))
+		group.Handle("/b", handler("/b"), middleware("handler1b"))
+
+		b.ProcessUpdate(Update{
+			Message: &Message{Text: "/a"},
+		})
+		assert.Equal(t, []string{
+			"global1:in", "global2:in",
+			"handler1a:in", "handler2a:in",
+			"/a",
+			"handler2a:out", "handler1a:out",
+			"global2:out", "global1:out",
+		}, trace)
+
+		trace = trace[:0]
+
+		b.ProcessUpdate(Update{
+			Message: &Message{Text: "/b"},
+		})
+		assert.Equal(t, []string{
+			"global1:in", "global2:in",
+			"group1:in", "group2:in",
+			"handler1b:in",
+			"/b",
+			"handler1b:out",
+			"group2:out", "group1:out",
+			"global2:out", "global1:out",
+		}, trace)
+	})
+
+	fatal := func(next HandlerFunc) HandlerFunc {
+		return func(c Context) error {
+			t.Fatal("fatal middleware should not be called")
+			return nil
+		}
+	}
+
+	nop := func(next HandlerFunc) HandlerFunc {
+		return func(c Context) error {
+			return next(c)
+		}
+	}
+
+	t.Run("combining with global middleware", func(t *testing.T) {
+		b, err := NewBot(Settings{Synchronous: true, Offline: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Pre-allocate middleware slice to make sure
+		// it has extra capacity after group-level middleware is added.
+		b.group.middleware = make([]MiddlewareFunc, 0, 2)
+		b.Use(nop)
+
+		b.Handle("/a", func(c Context) error { return nil }, nop)
+		b.Handle("/b", func(c Context) error { return nil }, fatal)
+
+		b.ProcessUpdate(Update{Message: &Message{Text: "/a"}})
+	})
+
+	t.Run("combining with group middleware", func(t *testing.T) {
+		b, err := NewBot(Settings{Synchronous: true, Offline: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		g := b.Group()
+		// Pre-allocate middleware slice to make sure
+		// it has extra capacity after group-level middleware is added.
+		g.middleware = make([]MiddlewareFunc, 0, 2)
+		g.Use(nop)
+
+		g.Handle("/a", func(c Context) error { return nil }, nop)
+		g.Handle("/b", func(c Context) error { return nil }, fatal)
+
+		b.ProcessUpdate(Update{Message: &Message{Text: "/a"}})
+	})
 }
 
 func TestBot(t *testing.T) {
@@ -386,7 +513,7 @@ func TestBot(t *testing.T) {
 	assert.Equal(t, ErrBadRecipient, err)
 
 	photo := &Photo{
-		File:    FromURL("https://telegra.ph/file/65c5237b040ebf80ec278.jpg"),
+		File:    logo,
 		Caption: t.Name(),
 	}
 	var msg *Message
@@ -414,26 +541,53 @@ func TestBot(t *testing.T) {
 		assert.NotEmpty(t, msgs[0].AlbumID)
 	})
 
+	t.Run("SendPaid()", func(t *testing.T) {
+		_, err = b.SendPaid(nil, 0, nil)
+		assert.Equal(t, ErrBadRecipient, err)
+
+		_, err = b.SendPaid(channel, 0, nil)
+		assert.Error(t, err)
+
+		photo2 := *photo
+		photo2.Caption = ""
+
+		msg, err := b.SendPaid(channel, 1, PaidAlbum{photo, &photo2}, ModeHTML)
+		require.NoError(t, err)
+		require.NotNil(t, msg)
+		assert.Equal(t, 1, msg.PaidMedia.Stars)
+		assert.Equal(t, 2, len(msg.PaidMedia.PaidMedia))
+	})
+
 	t.Run("EditCaption()+ParseMode", func(t *testing.T) {
-		b.parseMode = ModeHTML
+		b.parseMode = "html"
 
 		edited, err := b.EditCaption(msg, "<b>new caption with html</b>")
 		require.NoError(t, err)
 		assert.Equal(t, "new caption with html", edited.Caption)
 		assert.Equal(t, EntityBold, edited.CaptionEntities[0].Type)
 
+		sleep()
+
 		edited, err = b.EditCaption(msg, "*new caption with markdown*", ModeMarkdown)
 		require.NoError(t, err)
 		assert.Equal(t, "new caption with markdown", edited.Caption)
 		assert.Equal(t, EntityBold, edited.CaptionEntities[0].Type)
 
-		b.parseMode = ModeDefault
+		sleep()
+
+		edited, err = b.EditCaption(msg, "_new caption with markdown \\(V2\\)_", ModeMarkdownV2)
+		require.NoError(t, err)
+		assert.Equal(t, "new caption with markdown (V2)", edited.Caption)
+		assert.Equal(t, EntityItalic, edited.CaptionEntities[0].Type)
 	})
 
 	t.Run("Edit(what=Media)", func(t *testing.T) {
+		photo.Caption = "<code>new caption with html</code>"
+
 		edited, err := b.Edit(msg, photo)
 		require.NoError(t, err)
 		assert.Equal(t, edited.Photo.UniqueID, photo.UniqueID)
+		assert.Equal(t, EntityCode, edited.CaptionEntities[0].Type)
 
 		resp, err := http.Get("https://telegra.ph/file/274e5eb26f348b10bd8ee.mp4")
 		require.NoError(t, err)
@@ -573,40 +727,62 @@ func TestBot(t *testing.T) {
 	})
 
 	t.Run("Commands", func(t *testing.T) {
-		orig := []Command{{
-			Text:        "test",
-			Description: "test command",
-		}}
-		require.NoError(t, b.SetCommands(orig))
+		var (
+			set1 = []Command{{
+				Text:        "test1",
+				Description: "test command 1",
+			}}
+			set2 = []Command{{
+				Text:        "test2",
+				Description: "test command 2",
+			}}
+			scope = CommandScope{
+				Type:   CommandScopeChat,
+				ChatID: chatID,
+			}
+		)
+
+		err := b.SetCommands(set1)
+		require.NoError(t, err)
 
 		cmds, err := b.Commands()
 		require.NoError(t, err)
-		assert.Equal(t, orig, cmds)
+		assert.Equal(t, set1, cmds)
+
+		err = b.SetCommands(set2, "en", scope)
+		require.NoError(t, err)
+
+		cmds, err = b.Commands()
+		require.NoError(t, err)
+		assert.Equal(t, set1, cmds)
+
+		cmds, err = b.Commands("en", scope)
+		require.NoError(t, err)
+		assert.Equal(t, set2, cmds)
+
+		require.NoError(t, b.DeleteCommands("en", scope))
+		require.NoError(t, b.DeleteCommands())
 	})
 
-	t.Run("CreateInviteLink", func(t *testing.T) {
+	t.Run("InviteLink", func(t *testing.T) {
 		inviteLink, err := b.CreateInviteLink(&Chat{ID: chatID}, nil)
-		assert.Nil(t, err)
+		require.NoError(t, err)
 		assert.True(t, len(inviteLink.InviteLink) > 0)
-	})
 
-	t.Run("EditInviteLink", func(t *testing.T) {
-		inviteLink, err := b.CreateInviteLink(&Chat{ID: chatID}, nil)
-		assert.Nil(t, err)
-		assert.True(t, len(inviteLink.InviteLink) > 0)
+		sleep()
 
 		response, err := b.EditInviteLink(&Chat{ID: chatID}, &ChatInviteLink{InviteLink: inviteLink.InviteLink})
-		assert.Nil(t, err)
+		require.NoError(t, err)
+		assert.True(t, len(response.InviteLink) > 0)
+
+		sleep()
+
+		response, err = b.RevokeInviteLink(&Chat{ID: chatID}, inviteLink.InviteLink)
+		require.Nil(t, err)
 		assert.True(t, len(response.InviteLink) > 0)
 	})
+}
 
-	t.Run("RevokeInviteLink", func(t *testing.T) {
-		inviteLink, err := b.CreateInviteLink(&Chat{ID: chatID}, nil)
-		assert.Nil(t, err)
-		assert.True(t, len(inviteLink.InviteLink) > 0)
-
-		response, err := b.RevokeInviteLink(&Chat{ID: chatID}, inviteLink.InviteLink)
-		assert.Nil(t, err)
-		assert.True(t, len(response.InviteLink) > 0)
-	})
+func sleep() {
+	time.Sleep(time.Second)
 }

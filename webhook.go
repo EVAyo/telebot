@@ -38,18 +38,23 @@ type WebhookEndpoint struct {
 // You can also leave the Listen field empty. In this case it is up to the caller to
 // add the Webhook to a http-mux.
 //
+// If you want to ignore the automatic setWebhook call, you can set IgnoreSetWebhook to true.
+//
 type Webhook struct {
-	Listen         string   `json:"url"`
-	MaxConnections int      `json:"max_connections"`
-	AllowedUpdates []string `json:"allowed_updates"`
-	IP             string   `json:"ip_address"`
-	DropUpdates    bool     `json:"drop_pending_updates"`
+	Listen           string   `json:"url"`
+	MaxConnections   int      `json:"max_connections"`
+	AllowedUpdates   []string `json:"allowed_updates"`
+	IP               string   `json:"ip_address"`
+	DropUpdates      bool     `json:"drop_pending_updates"`
+	SecretToken      string   `json:"secret_token"`
+	IgnoreSetWebhook bool     `json:"ignore_set_web_hook"`
 
 	// (WebhookInfo)
-	HasCustomCert  bool   `json:"has_custom_certificate"`
-	PendingUpdates int    `json:"pending_update_count"`
-	ErrorUnixtime  int64  `json:"last_error_date"`
-	ErrorMessage   string `json:"last_error_message"`
+	HasCustomCert     bool   `json:"has_custom_certificate"`
+	PendingUpdates    int    `json:"pending_update_count"`
+	ErrorUnixtime     int64  `json:"last_error_date"`
+	ErrorMessage      string `json:"last_error_message"`
+	SyncErrorUnixtime int64  `json:"last_synchronization_error_date"`
 
 	TLS      *WebhookTLS
 	Endpoint *WebhookEndpoint
@@ -96,6 +101,9 @@ func (h *Webhook) getParams() map[string]string {
 	if h.DropUpdates {
 		params["drop_pending_updates"] = strconv.FormatBool(h.DropUpdates)
 	}
+	if h.SecretToken != "" {
+		params["secret_token"] = h.SecretToken
+	}
 
 	if h.TLS != nil {
 		params["url"] = "https://" + h.Listen
@@ -113,10 +121,13 @@ func (h *Webhook) getParams() map[string]string {
 }
 
 func (h *Webhook) Poll(b *Bot, dest chan Update, stop chan struct{}) {
-	if err := b.SetWebhook(h); err != nil {
-		b.debug(err)
-		close(stop)
-		return
+	// by default, the set webhook method will be called, to ignore it, set IgnoreSetWebhook to true
+	if !h.IgnoreSetWebhook {
+		if err := b.SetWebhook(h); err != nil {
+			b.OnError(err, nil)
+			close(stop)
+			return
+		}
 	}
 
 	// store the variables so the HTTP-handler can use 'em
@@ -153,6 +164,11 @@ func (h *Webhook) waitForStop(stop chan struct{}) {
 // The handler simply reads the update from the body of the requests
 // and writes them to the update channel.
 func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.SecretToken != "" && r.Header.Get("X-Telegram-Bot-Api-Secret-Token") != h.SecretToken {
+		h.bot.debug(fmt.Errorf("invalid secret token in request"))
+		return
+	}
+
 	var update Update
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		h.bot.debug(fmt.Errorf("cannot decode update: %v", err))
